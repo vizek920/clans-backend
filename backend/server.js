@@ -10,6 +10,14 @@ import {
   removeSocket,
   getPublicState,
   getPrivateStateFor,
+  dealCards,
+  startVoting,
+  castVote,
+  allVotesIn,
+  resolveVoting,
+  castFinalChoice,
+  finalChoicesReady,
+  resolveFinal,
 } from "./rooms.js";
 
 const PORT = process.env.PORT || 3001;
@@ -70,6 +78,52 @@ io.on("connection", (socket) => {
     removeSocket(socket.id);
     socket.leave(code);
     broadcastRoomState(room);
+  });
+
+  socket.on("start_game", ({ code } = {}, callback) => {
+    const room = getRoom(code);
+    if (!room) return callback?.({ error: "الغرفة غير موجودة" });
+    if (room.hostId !== socket.id) return callback?.({ error: "بس المضيف يقدر يبدأ اللعبة" });
+    const connectedCount = [...room.players.values()].filter((p) => p.connected).length;
+    if (connectedCount < 3) return callback?.({ error: "تحتاج 3 لاعبين على الأقل" });
+    dealCards(room);
+    callback?.({ ok: true });
+    broadcastRoomState(room);
+  });
+
+  socket.on("start_voting", ({ code } = {}, callback) => {
+    const room = getRoom(code);
+    if (!room) return callback?.({ error: "الغرفة غير موجودة" });
+    const result = startVoting(room, socket.id);
+    if (result.error) return callback?.(result);
+    callback?.({ ok: true });
+    broadcastRoomState(room);
+  });
+
+  socket.on("cast_vote", ({ code, targetId } = {}, callback) => {
+    const room = getRoom(code);
+    if (!room) return callback?.({ error: "الغرفة غير موجودة" });
+    const result = castVote(room, socket.id, targetId);
+    if (result.error) return callback?.(result);
+    callback?.({ ok: true });
+    broadcastRoomState(room);
+    if (allVotesIn(room)) {
+      resolveVoting(room);
+      broadcastRoomState(room);
+    }
+  });
+
+  socket.on("cast_final_choice", ({ code, choice } = {}, callback) => {
+    const room = getRoom(code);
+    if (!room) return callback?.({ error: "الغرفة غير موجودة" });
+    const result = castFinalChoice(room, socket.id, choice);
+    if (result.error) return callback?.(result);
+    callback?.({ ok: true });
+    broadcastRoomState(room);
+    if (finalChoicesReady(room)) {
+      resolveFinal(room);
+      broadcastRoomState(room);
+    }
   });
 
   socket.on("disconnect", () => {
