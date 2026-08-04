@@ -5,7 +5,10 @@ import { Server } from "socket.io";
 import {
   createRoom,
   getRoom,
-  joinRoomAsPlayer,
+  requestJoin,
+  approveJoin,
+  rejectJoin,
+  kickPlayer,
   joinRoomAsDisplay,
   removeSocket,
   getPublicState,
@@ -36,7 +39,7 @@ const io = new Server(httpServer, {
   cors: { origin: ALLOWED_ORIGINS, methods: ["GET", "POST"] },
 });
 
-// يبعث لكل لاعب نسخته الخاصة + لكل شاشات العرض النسخة العامة
+// يبعث لكل لاعب نسخته الخاصة + لكل شاشات العرض النسخة العامة + تنبيه بسيط للمنتظرين موافقة
 function broadcastRoomState(room) {
   for (const player of room.players.values()) {
     if (player.connected) {
@@ -46,6 +49,9 @@ function broadcastRoomState(room) {
   const publicState = getPublicState(room);
   for (const displayId of room.displays) {
     io.to(displayId).emit("state_update", publicState);
+  }
+  for (const pendingId of room.pending.keys()) {
+    io.to(pendingId).emit("pending_update", { code: room.code });
   }
 }
 
@@ -58,18 +64,53 @@ io.on("connection", (socket) => {
   });
 
   socket.on("join_room", ({ code, name, type } = {}, callback) => {
-    const result =
-      type === "display"
-        ? joinRoomAsDisplay(code, socket.id)
-        : joinRoomAsPlayer(code, socket.id, name);
+    if (type === "display") {
+      const result = joinRoomAsDisplay(code, socket.id);
+      if (result.error) return callback?.({ error: result.error });
+      socket.join(result.room.code);
+      callback?.({ code: result.room.code });
+      broadcastRoomState(result.room);
+      return;
+    }
 
+    const result = requestJoin(code, socket.id, name);
     if (result.error) {
       callback?.({ error: result.error });
       return;
     }
     socket.join(result.room.code);
-    callback?.({ code: result.room.code });
+    callback?.({ code: result.room.code, pending: true });
     broadcastRoomState(result.room);
+  });
+
+  socket.on("approve_join", ({ code, targetId } = {}, callback) => {
+    const room = getRoom(code);
+    if (!room) return callback?.({ error: "الغرفة غير موجودة" });
+    if (room.hostId !== socket.id) return callback?.({ error: "بس المضيف يقدر يوافق" });
+    const result = approveJoin(room, targetId);
+    if (result?.error) return callback?.(result);
+    callback?.({ ok: true });
+    broadcastRoomState(room);
+  });
+
+  socket.on("reject_join", ({ code, targetId } = {}, callback) => {
+    const room = getRoom(code);
+    if (!room) return callback?.({ error: "الغرفة غير موجودة" });
+    if (room.hostId !== socket.id) return callback?.({ error: "بس المضيف يقدر يرفض" });
+    rejectJoin(room, targetId);
+    io.to(targetId).emit("join_rejected", { code });
+    callback?.({ ok: true });
+    broadcastRoomState(room);
+  });
+
+  socket.on("kick_player", ({ code, targetId } = {}, callback) => {
+    const room = getRoom(code);
+    if (!room) return callback?.({ error: "الغرفة غير موجودة" });
+    const result = kickPlayer(room, targetId, socket.id);
+    if (result?.error) return callback?.(result);
+    io.to(targetId).emit("kicked", { code });
+    callback?.({ ok: true });
+    broadcastRoomState(room);
   });
 
   socket.on("leave_room", ({ code } = {}) => {
