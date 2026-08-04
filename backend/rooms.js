@@ -35,6 +35,7 @@ function createRoom(hostSocketId, hostName) {
     phase: "lobby", // lobby | discussion | voting | final | ended
     players: new Map(), // socketId -> { id, name, connected, cards, isKiller, isEliminated }
     displays: new Set(), // socketId set لعملاء شاشة العرض
+    pending: new Map(), // socketId -> { id, name } بانتظار موافقة المضيف
     round: 0,
     votes: {}, // voterId -> targetId (مرحلة voting فقط)
     finalPlayers: null, // [id, id] لما نوصل النهائي
@@ -64,14 +65,34 @@ function getRoom(code) {
   return rooms.get((code || "").toUpperCase());
 }
 
-function joinRoomAsPlayer(code, socketId, name) {
+function requestJoin(code, socketId, name) {
   const room = getRoom(code);
   if (!room) return { error: "الغرفة غير موجودة" };
   if (room.phase !== "lobby") return { error: "اللعبة بدأت بالفعل، لا يمكن الانضمام الآن" };
   if (room.players.size >= 12) return { error: "الغرفة ممتلئة" };
   clearEmptyTimer(room);
-  room.players.set(socketId, makePlayer(socketId, name));
+  room.pending.set(socketId, { id: socketId, name: (name || "لاعب").slice(0, 20) });
   return { room };
+}
+
+function approveJoin(room, targetId) {
+  const req = room.pending.get(targetId);
+  if (!req) return { error: "طلب الانضمام غير موجود (ربما انسحب اللاعب)" };
+  room.pending.delete(targetId);
+  room.players.set(targetId, makePlayer(targetId, req.name));
+  return {};
+}
+
+function rejectJoin(room, targetId) {
+  room.pending.delete(targetId);
+}
+
+function kickPlayer(room, targetId, requesterId) {
+  if (room.hostId !== requesterId) return { error: "بس المضيف يقدر يطرد لاعب" };
+  if (targetId === room.hostId) return { error: "ما تقدر تطرد نفسك" };
+  const existed = room.players.delete(targetId);
+  if (!existed) return { error: "لاعب غير موجود" };
+  return {};
 }
 
 function joinRoomAsDisplay(code, socketId) {
@@ -84,12 +105,22 @@ function joinRoomAsDisplay(code, socketId) {
 
 function removeSocket(socketId) {
   for (const room of rooms.values()) {
+    if (room.pending.has(socketId)) {
+      room.pending.delete(socketId);
+      maybeScheduleCleanup(room);
+      return room;
+    }
     if (room.players.has(socketId)) {
       const player = room.players.get(socketId);
       player.connected = false;
       // نحذف اللاعب فعلياً لو ما زالت اللعبة بمرحلة الانتظار
       if (room.phase === "lobby") {
         room.players.delete(socketId);
+      }
+      // لو انسحب المضيف، ننقل الصلاحية لأول لاعب متصل عشان الغرفة ما تعلق بدون هوست
+      if (room.hostId === socketId) {
+        const nextHost = [...room.players.values()].find((p) => p.connected);
+        if (nextHost) room.hostId = nextHost.id;
       }
       maybeScheduleCleanup(room);
       return room;
@@ -105,7 +136,7 @@ function removeSocket(socketId) {
 
 function maybeScheduleCleanup(room) {
   const hasConnectedPlayers = [...room.players.values()].some((p) => p.connected);
-  if (!hasConnectedPlayers && room.displays.size === 0) {
+  if (!hasConnectedPlayers && room.displays.size === 0 && room.pending.size === 0) {
     clearEmptyTimer(room);
     room.emptyTimer = setTimeout(() => rooms.delete(room.code), EMPTY_ROOM_TTL_MS);
   }
@@ -316,6 +347,7 @@ function getPublicState(room) {
 // الحالة الخاصة للاعب معين — تضيف كروته السرية فقط له
 function getPrivateStateFor(room, socketId) {
   const me = room.players.get(socketId);
+  const isHost = socketId === room.hostId;
   return {
     ...getPublicState(room),
     you: me
@@ -328,6 +360,7 @@ function getPrivateStateFor(room, socketId) {
           myVoteTarget: room.votes[socketId] || null,
         }
       : null,
+    pendingRequests: isHost ? [...room.pending.values()] : [],
   };
 }
 
@@ -335,7 +368,10 @@ export {
   rooms,
   createRoom,
   getRoom,
-  joinRoomAsPlayer,
+  requestJoin,
+  approveJoin,
+  rejectJoin,
+  kickPlayer,
   joinRoomAsDisplay,
   removeSocket,
   getPublicState,
