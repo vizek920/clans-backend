@@ -39,12 +39,16 @@ const io = new Server(httpServer, {
   cors: { origin: ALLOWED_ORIGINS, methods: ["GET", "POST"] },
 });
 
-// يبعث لكل لاعب نسخته الخاصة + لكل شاشات العرض النسخة العامة + تنبيه بسيط للمنتظرين موافقة
+// يبعث لكل لاعب نسخته الخاصة + للمضيف (اللي مو لاعب) + لكل شاشات العرض النسخة العامة + تنبيه بسيط للمنتظرين موافقة
 function broadcastRoomState(room) {
   for (const player of room.players.values()) {
     if (player.connected) {
       io.to(player.id).emit("state_update", getPrivateStateFor(room, player.id));
     }
+  }
+  // المضيف مو لاعب، فمو موجود بقائمة room.players — لازم نبعث له حالته بشكل منفصل
+  if (room.hostId && !room.players.has(room.hostId)) {
+    io.to(room.hostId).emit("state_update", getPrivateStateFor(room, room.hostId));
   }
   const publicState = getPublicState(room);
   for (const displayId of room.displays) {
