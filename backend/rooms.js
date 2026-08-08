@@ -32,8 +32,9 @@ function createRoom(hostSocketId, hostName) {
   const room = {
     code,
     hostId: hostSocketId,
+    hostName: (hostName || "المضيف").slice(0, 20),
     phase: "lobby", // lobby | discussion | voting | final | ended
-    players: new Map(), // socketId -> { id, name, connected, cards, isKiller, isEliminated }
+    players: new Map(), // socketId -> { id, name, connected, cards, isKiller, isEliminated } — اللاعبين فقط، المضيف مو منهم
     displays: new Set(), // socketId set لعملاء شاشة العرض
     pending: new Map(), // socketId -> { id, name } بانتظار موافقة المضيف
     round: 0,
@@ -44,7 +45,7 @@ function createRoom(hostSocketId, hostName) {
     createdAt: Date.now(),
     emptyTimer: null,
   };
-  room.players.set(hostSocketId, makePlayer(hostSocketId, hostName));
+  // ملاحظة: المضيف يراقب فقط ولا يُضاف كلاعب — دوره منفصل تماماً عن اللعب
   rooms.set(code, room);
   return room;
 }
@@ -105,6 +106,13 @@ function joinRoomAsDisplay(code, socketId) {
 
 function removeSocket(socketId) {
   for (const room of rooms.values()) {
+    if (room.hostId === socketId) {
+      // المضيف انقطع أو غادر — ننقل الصلاحية لأول لاعب متصل، ولو محد موجود تبقى الغرفة بدون مضيف مؤقتاً
+      const nextHost = [...room.players.values()].find((p) => p.connected);
+      room.hostId = nextHost ? nextHost.id : null;
+      maybeScheduleCleanup(room);
+      return room;
+    }
     if (room.pending.has(socketId)) {
       room.pending.delete(socketId);
       maybeScheduleCleanup(room);
@@ -116,11 +124,6 @@ function removeSocket(socketId) {
       // نحذف اللاعب فعلياً لو ما زالت اللعبة بمرحلة الانتظار
       if (room.phase === "lobby") {
         room.players.delete(socketId);
-      }
-      // لو انسحب المضيف، ننقل الصلاحية لأول لاعب متصل عشان الغرفة ما تعلق بدون هوست
-      if (room.hostId === socketId) {
-        const nextHost = [...room.players.values()].find((p) => p.connected);
-        if (nextHost) room.hostId = nextHost.id;
       }
       maybeScheduleCleanup(room);
       return room;
@@ -330,6 +333,7 @@ function getPublicState(room) {
     phase: room.phase,
     round: room.round,
     hostId: room.hostId,
+    hostName: room.hostName,
     players: [...room.players.values()].map((p) => ({
       id: p.id,
       name: p.name,
