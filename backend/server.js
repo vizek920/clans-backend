@@ -18,6 +18,9 @@ import {
   castVote,
   allVotesIn,
   resolveVoting,
+  setFinalDeck,
+  selectFinalCards,
+  revealNextFinalCard,
   castFinalChoice,
   finalChoicesReady,
   resolveFinal,
@@ -156,6 +159,33 @@ io.on("connection", (socket) => {
       resolveVoting(room);
       broadcastRoomState(room);
     }
+  });
+
+  socket.on("set_final_deck", ({ code, cards } = {}, callback) => {
+    const room = getRoom(code);
+    if (!room) return callback?.({ error: "الغرفة غير موجودة" });
+    const result = setFinalDeck(room, socket.id, cards);
+    if (result.error) return callback?.(result);
+    callback?.({ ok: true });
+    broadcastRoomState(room);
+  });
+
+  socket.on("select_final_cards", ({ code, cardIds } = {}, callback) => {
+    const room = getRoom(code);
+    if (!room) return callback?.({ error: "الغرفة غير موجودة" });
+    const result = selectFinalCards(room, socket.id, cardIds);
+    if (result.error) return callback?.(result);
+    callback?.({ ok: true });
+    broadcastRoomState(room);
+  });
+
+  socket.on("reveal_final_card", ({ code } = {}, callback) => {
+    const room = getRoom(code);
+    if (!room) return callback?.({ error: "الغرفة غير موجودة" });
+    const result = revealNextFinalCard(room, socket.id);
+    if (result.error) return callback?.(result);
+    callback?.({ ok: true });
+    broadcastRoomState(room);
   });
 
   socket.on("cast_final_choice", ({ code, choice } = {}, callback) => {
