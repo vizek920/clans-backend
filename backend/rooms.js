@@ -16,6 +16,22 @@ function randomMoneyValue() {
   return MONEY_VALUES[Math.floor(Math.random() * MONEY_VALUES.length)];
 }
 
+// كروت الجولة النهائية (٢٠ كارت يجهزها المضيف مسبقاً) — قيمة افتراضية لو المضيف ما جهزها بنفسه
+const FINAL_DECK_SIZE = 20;
+const FINAL_CARDS_TO_REVEAL = 6;
+
+function generateDefaultFinalDeck() {
+  const defaults = [
+    20, 30, 50, 50, 100, 150, 200, 250, 300, 500, 500, 750, 1000, 1000, 1500, 2000, 2500, 3000, 5000, 10000,
+  ];
+  return defaults.map((value, i) => ({
+    id: `c${i + 1}`,
+    value,
+    isKiller: i === 6 || i === 13, // كارتين قاتل افتراضياً بالمنتصف تقريباً
+    label: i === 6 || i === 13 ? "القاتل" : null,
+  }));
+}
+
 
 function generateRoomCode() {
   let code;
@@ -42,6 +58,12 @@ function createRoom(hostSocketId, hostName) {
     finalPlayers: null, // [id, id] لما نوصل النهائي
     finalChoices: {}, // playerId -> 'split' | 'steal'
     finalResult: null,
+    finalDeck: generateDefaultFinalDeck(), // ٢٠ كارت يجهزها المضيف قبل البطولة (قيمة افتراضية جاهزة)
+    finalStage: null, // null | 'select' | 'reveal' | 'choice' — فقط أثناء الجولة النهائية
+    finalSequence: [], // الـ 6 كروت المختارة للنهائي بترتيب الكشف
+    finalRevealIndex: 0,
+    finalRunningTotal: 0,
+    finalPot: null,
     createdAt: Date.now(),
     emptyTimer: null,
   };
@@ -260,6 +282,11 @@ function resolveVoting(room) {
     room.phase = "final";
     room.finalPlayers = remaining.map((p) => p.id);
     room.finalChoices = {};
+    room.finalStage = "select";
+    room.finalSequence = [];
+    room.finalRevealIndex = 0;
+    room.finalRunningTotal = 0;
+    room.finalPot = null;
   } else {
     room.round += 1;
     room.phase = "discussion";
@@ -267,10 +294,73 @@ function resolveVoting(room) {
   }
 }
 
+// ---------- إعداد كروت الجولة النهائية (يجهزها المضيف) ----------
+
+function setFinalDeck(room, requesterId, cards) {
+  if (room.hostId !== requesterId) return { error: "بس المضيف يقدر يعدّل كروت النهائي" };
+  if (room.phase === "final" || room.phase === "ended")
+    return { error: "ما تقدر تعدّل الكروت بعد بداية الجولة النهائية" };
+  if (!Array.isArray(cards) || cards.length !== FINAL_DECK_SIZE)
+    return { error: `لازم بالضبط ${FINAL_DECK_SIZE} كارت` };
+
+  const cleaned = cards.map((c, i) => ({
+    id: `c${i + 1}`,
+    value: Math.max(0, Number(c.value) || 0),
+    isKiller: !!c.isKiller,
+    label: c.isKiller ? (c.label ? String(c.label).slice(0, 20) : "القاتل") : null,
+  }));
+  room.finalDeck = cleaned;
+  return {};
+}
+
+// ---------- اختيار وكشف كروت الجولة النهائية ----------
+
+function selectFinalCards(room, requesterId, cardIds) {
+  if (room.phase !== "final" || room.finalStage !== "select")
+    return { error: "مو وقت اختيار كروت النهائي" };
+  if (room.hostId !== requesterId) return { error: "بس المضيف يقدر يختار كروت النهائي" };
+  if (!Array.isArray(cardIds) || cardIds.length !== FINAL_CARDS_TO_REVEAL)
+    return { error: `لازم تختار بالضبط ${FINAL_CARDS_TO_REVEAL} كروت` };
+
+  const unique = new Set(cardIds);
+  if (unique.size !== cardIds.length) return { error: "ما تقدر تختار نفس الكارت مرتين" };
+
+  const sequence = [];
+  for (const id of cardIds) {
+    const card = room.finalDeck.find((c) => c.id === id);
+    if (!card) return { error: "كارت غير موجود بالمجموعة" };
+    sequence.push(card);
+  }
+
+  room.finalSequence = sequence;
+  room.finalRevealIndex = 0;
+  room.finalRunningTotal = 0;
+  room.finalStage = "reveal";
+  return {};
+}
+
+function revealNextFinalCard(room, requesterId) {
+  if (room.phase !== "final" || room.finalStage !== "reveal")
+    return { error: "مو وقت كشف كروت النهائي" };
+  if (room.hostId !== requesterId) return { error: "بس المضيف يقدر يكشف الكروت" };
+  if (room.finalRevealIndex >= room.finalSequence.length) return { error: "خلصت الكروت" };
+
+  const card = room.finalSequence[room.finalRevealIndex];
+  room.finalRunningTotal = card.isKiller ? 0 : room.finalRunningTotal + card.value;
+  room.finalRevealIndex += 1;
+
+  if (room.finalRevealIndex >= room.finalSequence.length) {
+    room.finalStage = "choice";
+    room.finalPot = room.finalRunningTotal;
+  }
+  return {};
+}
+
 // ---------- الجولة النهائية: شاركني / اسرقني ----------
 
 function castFinalChoice(room, playerId, choice) {
   if (room.phase !== "final") return { error: "مو وقت القرار النهائي" };
+  if (room.finalStage !== "choice") return { error: "بننتظر كشف كل كروت الجولة النهائية الأول" };
   if (!room.finalPlayers?.includes(playerId)) return { error: "أنت مو من ضمن النهائي" };
   if (!["split", "steal"].includes(choice)) return { error: "اختيار غير صالح" };
   room.finalChoices[playerId] = choice;
@@ -281,15 +371,11 @@ function finalChoicesReady(room) {
   return room.finalPlayers.every((id) => room.finalChoices[id]);
 }
 
-function playerMoneyTotal(player) {
-  return player.cards.filter((c) => !c.isKiller).reduce((sum, c) => sum + c.value, 0);
-}
-
 function resolveFinal(room) {
   const [aId, bId] = room.finalPlayers;
   const a = room.players.get(aId);
   const b = room.players.get(bId);
-  const pot = playerMoneyTotal(a) + playerMoneyTotal(b);
+  const pot = room.finalPot ?? 0;
   const choiceA = room.finalChoices[aId];
   const choiceB = room.finalChoices[bId];
 
@@ -320,6 +406,7 @@ function resolveFinal(room) {
 }
 
 
+
 // الحالة العامة المسموح للجميع رؤيتها (لاعبين + شاشة العرض)
 function getPublicState(room) {
   const voteCounts = {};
@@ -345,6 +432,17 @@ function getPublicState(room) {
     finalPlayers: room.finalPlayers,
     finalSubmitted: Object.keys(room.finalChoices || {}),
     finalResult: room.phase === "ended" ? room.finalResult : null,
+    finalStage: room.finalStage,
+    finalSequence:
+      room.finalStage && room.finalStage !== "select"
+        ? room.finalSequence.map((c, i) =>
+            i < room.finalRevealIndex
+              ? { value: c.value, isKiller: c.isKiller, label: c.label, revealed: true }
+              : { revealed: false }
+          )
+        : null,
+    finalRunningTotal: room.finalRunningTotal,
+    finalPot: room.finalStage === "choice" || room.phase === "ended" ? room.finalPot : null,
   };
 }
 
@@ -365,6 +463,7 @@ function getPrivateStateFor(room, socketId) {
         }
       : null,
     pendingRequests: isHost ? [...room.pending.values()] : [],
+    finalDeck: isHost ? room.finalDeck : null,
   };
 }
 
@@ -385,6 +484,9 @@ export {
   castVote,
   allVotesIn,
   resolveVoting,
+  setFinalDeck,
+  selectFinalCards,
+  revealNextFinalCard,
   castFinalChoice,
   finalChoicesReady,
   resolveFinal,
