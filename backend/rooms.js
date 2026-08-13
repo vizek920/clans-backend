@@ -59,9 +59,12 @@ function createRoom(hostSocketId, hostName) {
     finalChoices: {}, // playerId -> 'split' | 'steal'
     finalResult: null,
     finalDeck: generateDefaultFinalDeck(), // ٢٠ كارت يجهزها المضيف قبل البطولة (قيمة افتراضية جاهزة)
-    finalStage: null, // null | 'select' | 'reveal' | 'choice' — فقط أثناء الجولة النهائية
-    finalSequence: [], // الـ 6 كروت المختارة للنهائي بترتيب الكشف
-    finalRevealIndex: 0,
+    finalStage: null, // null | 'picking' | 'choice' — فقط أثناء الجولة النهائية
+    finalSequence: [], // الكروت المكشوفة فعلياً بالترتيب { id, value, isKiller, label, pickedBy }
+    finalTurnOrder: null, // [id, id] ترتيب الأدوار بالاختيار
+    finalTurnIndex: 0, // مين دوره الآن (0 أو 1 على finalTurnOrder)
+    finalPicksLeft: {}, // playerId -> كم كارت باقي له يختاره
+    finalPendingPick: null, // { cardId, pickedBy } بانتظار موافقة المضيف على الكشف
     finalRunningTotal: 0,
     finalPot: null,
     createdAt: Date.now(),
@@ -282,9 +285,15 @@ function resolveVoting(room) {
     room.phase = "final";
     room.finalPlayers = remaining.map((p) => p.id);
     room.finalChoices = {};
-    room.finalStage = "select";
+    room.finalStage = "picking";
+    room.finalTurnOrder = remaining.map((p) => p.id);
+    room.finalTurnIndex = 0;
+    room.finalPicksLeft = {
+      [room.finalTurnOrder[0]]: FINAL_CARDS_TO_REVEAL / 2,
+      [room.finalTurnOrder[1]]: FINAL_CARDS_TO_REVEAL / 2,
+    };
+    room.finalPendingPick = null;
     room.finalSequence = [];
-    room.finalRevealIndex = 0;
     room.finalRunningTotal = 0;
     room.finalPot = null;
   } else {
@@ -313,45 +322,50 @@ function setFinalDeck(room, requesterId, cards) {
   return {};
 }
 
-// ---------- اختيار وكشف كروت الجولة النهائية ----------
+// ---------- اختيار الكروت بالتناوب (المتنافسان يختارون بأنفسهم بشكل معمّى) وموافقة المضيف على كل كشف ----------
 
-function selectFinalCards(room, requesterId, cardIds) {
-  if (room.phase !== "final" || room.finalStage !== "select")
-    return { error: "مو وقت اختيار كروت النهائي" };
-  if (room.hostId !== requesterId) return { error: "بس المضيف يقدر يختار كروت النهائي" };
-  if (!Array.isArray(cardIds) || cardIds.length !== FINAL_CARDS_TO_REVEAL)
-    return { error: `لازم تختار بالضبط ${FINAL_CARDS_TO_REVEAL} كروت` };
+function pickFinalCard(room, playerId, cardId) {
+  if (room.phase !== "final" || room.finalStage !== "picking")
+    return { error: "مو وقت اختيار الكروت" };
+  if (room.finalPendingPick) return { error: "فيه كارت بانتظار موافقة المضيف، لازم تنتظر" };
+  const currentTurnPlayer = room.finalTurnOrder[room.finalTurnIndex];
+  if (playerId !== currentTurnPlayer) return { error: "مو دورك تختار الآن" };
+  if ((room.finalPicksLeft[playerId] || 0) <= 0) return { error: "خلصت كروتك" };
 
-  const unique = new Set(cardIds);
-  if (unique.size !== cardIds.length) return { error: "ما تقدر تختار نفس الكارت مرتين" };
+  const card = room.finalDeck.find((c) => c.id === cardId);
+  if (!card) return { error: "كارت غير موجود بالمجموعة" };
+  const alreadyUsed =
+    room.finalSequence.some((c) => c.id === cardId) || room.finalPendingPick?.cardId === cardId;
+  if (alreadyUsed) return { error: "هذا الكارت متأخوذ" };
 
-  const sequence = [];
-  for (const id of cardIds) {
-    const card = room.finalDeck.find((c) => c.id === id);
-    if (!card) return { error: "كارت غير موجود بالمجموعة" };
-    sequence.push(card);
-  }
-
-  room.finalSequence = sequence;
-  room.finalRevealIndex = 0;
-  room.finalRunningTotal = 0;
-  room.finalStage = "reveal";
+  room.finalPendingPick = { cardId, pickedBy: playerId };
   return {};
 }
 
-function revealNextFinalCard(room, requesterId) {
-  if (room.phase !== "final" || room.finalStage !== "reveal")
-    return { error: "مو وقت كشف كروت النهائي" };
-  if (room.hostId !== requesterId) return { error: "بس المضيف يقدر يكشف الكروت" };
-  if (room.finalRevealIndex >= room.finalSequence.length) return { error: "خلصت الكروت" };
+function approveFinalReveal(room, requesterId) {
+  if (room.phase !== "final" || room.finalStage !== "picking")
+    return { error: "مو الوقت المناسب" };
+  if (room.hostId !== requesterId) return { error: "بس المضيف يقدر يوافق على الكشف" };
+  if (!room.finalPendingPick) return { error: "محد اختار كارت بعد" };
 
-  const card = room.finalSequence[room.finalRevealIndex];
+  const { cardId, pickedBy } = room.finalPendingPick;
+  const card = room.finalDeck.find((c) => c.id === cardId);
   room.finalRunningTotal = card.isKiller ? 0 : room.finalRunningTotal + card.value;
-  room.finalRevealIndex += 1;
+  room.finalSequence.push({
+    id: card.id,
+    value: card.value,
+    isKiller: card.isKiller,
+    label: card.label,
+    pickedBy,
+  });
+  room.finalPicksLeft[pickedBy] -= 1;
+  room.finalPendingPick = null;
 
-  if (room.finalRevealIndex >= room.finalSequence.length) {
+  if (room.finalSequence.length >= FINAL_CARDS_TO_REVEAL) {
     room.finalStage = "choice";
     room.finalPot = room.finalRunningTotal;
+  } else {
+    room.finalTurnIndex = room.finalTurnIndex === 0 ? 1 : 0;
   }
   return {};
 }
@@ -433,14 +447,20 @@ function getPublicState(room) {
     finalSubmitted: Object.keys(room.finalChoices || {}),
     finalResult: room.phase === "ended" ? room.finalResult : null,
     finalStage: room.finalStage,
-    finalSequence:
-      room.finalStage && room.finalStage !== "select"
-        ? room.finalSequence.map((c, i) =>
-            i < room.finalRevealIndex
-              ? { value: c.value, isKiller: c.isKiller, label: c.label, revealed: true }
-              : { revealed: false }
-          )
+    // الكروت اللي انكشفت فعلياً بالترتيب (بقيمها) — الباقي يبقى معمّى بالـ finalDeckMasked
+    finalSequence: room.finalStage ? room.finalSequence : null,
+    // الشبكة الكاملة (٢٠ كارت) بدون قيم — بس نعرف أيها متاح وأيها متأخوذ، عشان يقدر المتنافس يختار مكانه
+    finalDeckMasked:
+      room.finalStage === "picking" || room.finalStage === "choice"
+        ? room.finalDeck.map((c) => ({
+            id: c.id,
+            taken: room.finalSequence.some((s) => s.id === c.id) || room.finalPendingPick?.cardId === c.id,
+          }))
         : null,
+    finalTurnOrder: room.finalTurnOrder,
+    finalTurnIndex: room.finalTurnIndex,
+    finalPicksLeft: room.finalPicksLeft,
+    finalPendingPick: room.finalPendingPick ? { pickedBy: room.finalPendingPick.pickedBy } : null,
     finalRunningTotal: room.finalRunningTotal,
     finalPot: room.finalStage === "choice" || room.phase === "ended" ? room.finalPot : null,
   };
@@ -485,8 +505,8 @@ export {
   allVotesIn,
   resolveVoting,
   setFinalDeck,
-  selectFinalCards,
-  revealNextFinalCard,
+  pickFinalCard,
+  approveFinalReveal,
   castFinalChoice,
   finalChoicesReady,
   resolveFinal,
