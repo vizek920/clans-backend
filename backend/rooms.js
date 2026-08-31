@@ -7,6 +7,7 @@ const EMPTY_ROOM_TTL_MS = 5 * 60 * 1000; // نحذف الغرفة بعد 5 دق�
 
 const CARDS_PER_PLAYER = 4;
 const MONEY_VALUES = [500, 1000, 2000, 5000, 7500, 10000, 15000, 25000, 40000, 60000, 100000];
+const MAX_PLAYERS = 100; // رفعناه من 12 لدعم فعاليات أكبر
 
 function formatMoney(value) {
   return value.toLocaleString("en-US") + " $";
@@ -32,7 +33,6 @@ function generateDefaultFinalDeck() {
   }));
 }
 
-
 function generateRoomCode() {
   let code;
   do {
@@ -50,7 +50,7 @@ function createRoom(hostSocketId, hostName) {
     hostId: hostSocketId,
     hostName: (hostName || "المضيف").slice(0, 20),
     phase: "lobby", // lobby | discussion | voting | final | ended
-    players: new Map(), // socketId -> { id, name, connected, cards, isKiller, isEliminated } — اللاعبين فقط، المضيف مو منهم
+    players: new Map(), // socketId -> { id, name, connected, cards, isKiller, isEliminated }
     displays: new Set(), // socketId set لعملاء شاشة العرض
     pending: new Map(), // socketId -> { id, name } بانتظار موافقة المضيف
     round: 0,
@@ -95,7 +95,7 @@ function requestJoin(code, socketId, name) {
   const room = getRoom(code);
   if (!room) return { error: "الغرفة غير موجودة" };
   if (room.phase !== "lobby") return { error: "اللعبة بدأت بالفعل، لا يمكن الانضمام الآن" };
-  if (room.players.size >= 12) return { error: "الغرفة ممتلئة" };
+  if (room.players.size >= MAX_PLAYERS) return { error: "الغرفة ممتلئة" };
   clearEmptyTimer(room);
   room.pending.set(socketId, { id: socketId, name: (name || "لاعب").slice(0, 20) });
   return { room };
@@ -218,7 +218,8 @@ function dealCards(room) {
 function revealRoundCards(room) {
   for (const player of room.players.values()) {
     if (player.isEliminated || !player.cards.length) continue;
-    const idx = Math.min(room.round - 1, player.cards.length - 1);
+    // ندوّر على الكروت بالتكرار (modulo) بدل ما نتجمّد على آخر كارت — يفيد بالجولات الطويلة (أعداد لاعبين كبيرة)
+    const idx = (room.round - 1) % player.cards.length;
     const card = player.cards[idx];
     player.revealedCard = card.isKiller ? "بطاقة القاتل ☠" : formatMoney(card.value);
   }
@@ -419,8 +420,6 @@ function resolveFinal(room) {
   };
 }
 
-
-
 // الحالة العامة المسموح للجميع رؤيتها (لاعبين + شاشة العرض)
 function getPublicState(room) {
   const voteCounts = {};
@@ -447,9 +446,7 @@ function getPublicState(room) {
     finalSubmitted: Object.keys(room.finalChoices || {}),
     finalResult: room.phase === "ended" ? room.finalResult : null,
     finalStage: room.finalStage,
-    // الكروت اللي انكشفت فعلياً بالترتيب (بقيمها) — الباقي يبقى معمّى بالـ finalDeckMasked
     finalSequence: room.finalStage ? room.finalSequence : null,
-    // الشبكة الكاملة (٢٠ كارت) بدون قيم — بس نعرف أيها متاح وأيها متأخوذ، عشان يقدر المتنافس يختار مكانه
     finalDeckMasked:
       room.finalStage === "picking" || room.finalStage === "choice"
         ? room.finalDeck.map((c) => ({
@@ -511,4 +508,3 @@ export {
   finalChoicesReady,
   resolveFinal,
 };
-
