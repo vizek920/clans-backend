@@ -56,6 +56,8 @@ function createRoom(hostSocketId, hostName) {
     displays: new Set(), // socketId set لعملاء شاشة العرض
     pending: new Map(), // socketId -> { id, name } بانتظار موافقة المضيف
     round: 0,
+    dealRoundOffset: 0, // نقطة صفر فهرسة الكشف — تتحدث عند كل إعادة توزيع كروت
+    roundMessage: null, // رسالة إعلان تظهر للجميع (مثلاً: انقرض القتلة، كروت جديدة)
     votes: {}, // voterId -> targetId (مرحلة voting فقط)
     finalPlayers: null, // [id, id] لما نوصل النهائي
     finalChoices: {}, // playerId -> 'split' | 'steal'
@@ -229,15 +231,29 @@ function clearEmptyTimer(room) {
 
 function dealCards(room) {
   const activePlayers = [...room.players.values()].filter((p) => p.connected);
+  assignFreshHands(room, activePlayers);
+
+  room.round = 1;
+  room.dealRoundOffset = 0;
+  room.phase = "discussion";
+  room.votes = {};
+  room.roundMessage = null;
+  room.finalPlayers = null;
+  room.finalChoices = {};
+  room.finalResult = null;
+  revealRoundCards(room);
+}
+
+// يوزّع كروت جديدة (فيها قتلة) على مجموعة لاعبين — يُستخدم بالتوزيع الأول وبإعادة التوزيع لما ينقرض القتلة
+function assignFreshHands(room, targetPlayers) {
   const killerCount = Math.min(
-    Math.max(1, Math.floor(activePlayers.length / 4)),
-    Math.max(activePlayers.length - 2, 1)
+    Math.max(1, Math.floor(targetPlayers.length / 4)),
+    Math.max(targetPlayers.length - 2, 1)
   );
-  const shuffled = [...activePlayers].sort(() => Math.random() - 0.5);
+  const shuffled = [...targetPlayers].sort(() => Math.random() - 0.5);
   const killerIds = new Set(shuffled.slice(0, killerCount).map((p) => p.id));
 
-  for (const player of room.players.values()) {
-    if (!player.connected) continue;
+  for (const player of targetPlayers) {
     const cards = Array.from({ length: CARDS_PER_PLAYER }, () => ({
       value: randomMoneyValue(),
       isKiller: false,
@@ -253,29 +269,14 @@ function dealCards(room) {
     player.revealedCard = null;
     player.isEliminated = false;
   }
-
-  room.round = 1;
-  room.phase = "discussion";
-  room.votes = {};
-  room.finalPlayers = null;
-  room.finalChoices = {};
-  room.finalResult = null;
-  revealRoundCards(room);
 }
 
 function revealRoundCards(room) {
-  const NEW_CARD_KILLER_CHANCE = 0.15;
   for (const player of room.players.values()) {
     if (player.isEliminated || !player.cards.length) continue;
-    const idx = room.round - 1;
-    if (idx >= player.cards.length) {
-      // خلصت كروته الأصلية — نولّد له كارت جديد (ممكن يطلع قاتل) عشان اللعبة تفضل حية لين ما يتبقى اثنين
-      const isKiller = Math.random() < NEW_CARD_KILLER_CHANCE;
-      player.cards.push(
-        isKiller ? { value: 0, isKiller: true } : { value: randomMoneyValue(), isKiller: false }
-      );
-      if (isKiller) player.isKiller = true;
-    }
+    const rawIdx = room.round - room.dealRoundOffset - 1;
+    // حماية احتياطية: لو تجاوزنا عدد الكروت المتاحة بدون إعادة توزيع (نادر)، نتجمد على آخر كارت بدل ما نطيح
+    const idx = Math.min(Math.max(rawIdx, 0), player.cards.length - 1);
     const card = player.cards[idx];
     player.revealedCard = card.isKiller ? "بطاقة القاتل ☠" : formatMoney(card.value);
   }
@@ -354,6 +355,15 @@ function resolveVoting(room) {
     room.finalRunningTotal = 0;
     room.finalPot = null;
   } else {
+    const anyKillerLeft = remaining.some((p) => p.isKiller);
+    if (!anyKillerLeft) {
+      // كل حاملي بطاقة القاتل انقصوا — نوزّع كروت جديدة فيها قتلة جدد عشان اللعبة تفضل حية
+      assignFreshHands(room, remaining);
+      room.dealRoundOffset = room.round;
+      room.roundMessage = "تم إقصاء جميع من يحمل بطاقة القاتل! توزّعت كروت جديدة وفيها قتلة جدد 🃏";
+    } else {
+      room.roundMessage = null;
+    }
     room.round += 1;
     room.phase = "discussion";
     revealRoundCards(room);
@@ -488,6 +498,7 @@ function getPublicState(room) {
     code: room.code,
     phase: room.phase,
     round: room.round,
+    roundMessage: room.roundMessage,
     hostId: room.hostId,
     hostName: room.hostName,
     players: [...room.players.values()].map((p) => ({
