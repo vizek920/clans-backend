@@ -6,6 +6,7 @@ import {
   createRoom,
   getRoom,
   requestJoin,
+  rejoinPlayer,
   approveJoin,
   rejectJoin,
   kickPlayer,
@@ -87,6 +88,14 @@ io.on("connection", (socket) => {
     }
     socket.join(result.room.code);
     callback?.({ code: result.room.code, pending: true });
+    broadcastRoomState(result.room);
+  });
+
+  socket.on("rejoin_room", ({ code, token } = {}, callback) => {
+    const result = rejoinPlayer(code, token, socket.id);
+    if (result.error) return callback?.({ error: result.error });
+    socket.join(result.room.code);
+    callback?.({ code: result.room.code, ok: true });
     broadcastRoomState(result.room);
   });
 
