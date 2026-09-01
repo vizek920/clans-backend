@@ -1,6 +1,8 @@
 // rooms.js
 // إدارة حالة الغرف في الذاكرة — بدون قاعدة بيانات، لأن اللعبة مؤقتة وبدون حسابات
 
+import { randomUUID } from "crypto";
+
 const rooms = new Map(); // code -> room object
 const ROOM_CODE_CHARS = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"; // بدون أحرف ملتبسة (O/0, I/1)
 const EMPTY_ROOM_TTL_MS = 5 * 60 * 1000; // نحذف الغرفة بعد 5 دقائق فارغة تماماً
@@ -84,6 +86,7 @@ function makePlayer(id, name) {
     revealedCard: null,
     isKiller: false,
     isEliminated: false,
+    token: randomUUID(), // يستخدم لإعادة الاتصال بعد الانقطاع أثناء اللعب
   };
 }
 
@@ -98,6 +101,51 @@ function requestJoin(code, socketId, name) {
   if (room.players.size >= MAX_PLAYERS) return { error: "الغرفة ممتلئة" };
   clearEmptyTimer(room);
   room.pending.set(socketId, { id: socketId, name: (name || "لاعب").slice(0, 20) });
+  return { room };
+}
+
+// إعادة اتصال لاعب انقطع أثناء اللعبة (مو مرحلة الانتظار) — نلقاه بالتوكن الثابت ونربطه بسوكيت جديد
+function rejoinPlayer(code, token, newSocketId) {
+  const room = getRoom(code);
+  if (!room) return { error: "الغرفة غير موجودة" };
+
+  let found = null;
+  let oldSocketId = null;
+  for (const [sid, player] of room.players.entries()) {
+    if (player.token === token) {
+      found = player;
+      oldSocketId = sid;
+      break;
+    }
+  }
+  if (!found) return { error: "ما لقينا حسابك بهذي الغرفة" };
+
+  room.players.delete(oldSocketId);
+  found.id = newSocketId;
+  found.connected = true;
+  room.players.set(newSocketId, found);
+
+  // لو كان هذا اللاعب مرشح بالجولة النهائية أو له صوت مسجل، لازم نحدّث مرجعه للسوكيت الجديد
+  if (room.finalPlayers) {
+    room.finalPlayers = room.finalPlayers.map((id) => (id === oldSocketId ? newSocketId : id));
+  }
+  if (room.finalTurnOrder) {
+    room.finalTurnOrder = room.finalTurnOrder.map((id) => (id === oldSocketId ? newSocketId : id));
+  }
+  if (room.finalPicksLeft && oldSocketId in room.finalPicksLeft) {
+    room.finalPicksLeft[newSocketId] = room.finalPicksLeft[oldSocketId];
+    delete room.finalPicksLeft[oldSocketId];
+  }
+  if (room.finalChoices && oldSocketId in room.finalChoices) {
+    room.finalChoices[newSocketId] = room.finalChoices[oldSocketId];
+    delete room.finalChoices[oldSocketId];
+  }
+  if (room.votes && oldSocketId in room.votes) {
+    room.votes[newSocketId] = room.votes[oldSocketId];
+    delete room.votes[oldSocketId];
+  }
+
+  clearEmptyTimer(room);
   return { room };
 }
 
@@ -216,10 +264,18 @@ function dealCards(room) {
 }
 
 function revealRoundCards(room) {
+  const NEW_CARD_KILLER_CHANCE = 0.15;
   for (const player of room.players.values()) {
     if (player.isEliminated || !player.cards.length) continue;
-    // ندوّر على الكروت بالتكرار (modulo) بدل ما نتجمّد على آخر كارت — يفيد بالجولات الطويلة (أعداد لاعبين كبيرة)
-    const idx = (room.round - 1) % player.cards.length;
+    const idx = room.round - 1;
+    if (idx >= player.cards.length) {
+      // خلصت كروته الأصلية — نولّد له كارت جديد (ممكن يطلع قاتل) عشان اللعبة تفضل حية لين ما يتبقى اثنين
+      const isKiller = Math.random() < NEW_CARD_KILLER_CHANCE;
+      player.cards.push(
+        isKiller ? { value: 0, isKiller: true } : { value: randomMoneyValue(), isKiller: false }
+      );
+      if (isKiller) player.isKiller = true;
+    }
     const card = player.cards[idx];
     player.revealedCard = card.isKiller ? "بطاقة القاتل ☠" : formatMoney(card.value);
   }
@@ -477,6 +533,7 @@ function getPrivateStateFor(room, socketId) {
           isKiller: me.isKiller,
           hasVoted: !!room.votes[socketId],
           myVoteTarget: room.votes[socketId] || null,
+          token: me.token,
         }
       : null,
     pendingRequests: isHost ? [...room.pending.values()] : [],
@@ -489,6 +546,7 @@ export {
   createRoom,
   getRoom,
   requestJoin,
+  rejoinPlayer,
   approveJoin,
   rejectJoin,
   kickPlayer,
