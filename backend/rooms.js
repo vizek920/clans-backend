@@ -146,6 +146,9 @@ function rejoinPlayer(code, token, newSocketId) {
     room.votes[newSocketId] = room.votes[oldSocketId];
     delete room.votes[oldSocketId];
   }
+  if (room.finalPendingPick && room.finalPendingPick.pickedBy === oldSocketId) {
+    room.finalPendingPick.pickedBy = newSocketId;
+  }
 
   clearEmptyTimer(room);
   return { room };
