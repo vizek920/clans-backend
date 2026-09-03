@@ -271,6 +271,31 @@ function assignFreshHands(room, targetPlayers) {
   }
 }
 
+// كل جولة (بعد أول توزيع)، نبدّل الكروت المالية بين اللاعبين النشطين — بطاقة القاتل تبقى ثابتة مع صاحبها الأصلي
+function swapRoundCards(room, activePlayers) {
+  const pool = [];
+  for (const player of activePlayers) {
+    for (const card of player.cards) {
+      if (!card.isKiller) pool.push(card);
+    }
+  }
+  // خلط الصندوق (Fisher–Yates)
+  for (let i = pool.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [pool[i], pool[j]] = [pool[j], pool[i]];
+  }
+  // نوزّع الكروت المالية من جديد — بطاقة القاتل تبقى بمكانها بنفس صاحبها
+  let poolIdx = 0;
+  for (const player of activePlayers) {
+    player.cards = player.cards.map((card) => {
+      if (card.isKiller) return card;
+      const replacement = pool[poolIdx];
+      poolIdx += 1;
+      return replacement;
+    });
+  }
+}
+
 function revealRoundCards(room) {
   for (const player of room.players.values()) {
     if (player.isEliminated || !player.cards.length) continue;
@@ -362,6 +387,8 @@ function resolveVoting(room) {
       room.dealRoundOffset = room.round;
       room.roundMessage = "تم إقصاء جميع من يحمل بطاقة القاتل! توزّعت كروت جديدة وفيها قتلة جدد 🃏";
     } else {
+      // نبدّل الكروت المالية بين اللاعبين كل جولة — بطاقة القاتل تبقى ثابتة مع صاحبها
+      swapRoundCards(room, remaining);
       room.roundMessage = null;
     }
     room.round += 1;
